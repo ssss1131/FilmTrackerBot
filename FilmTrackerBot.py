@@ -30,6 +30,10 @@ DELETE_WANT_TO_WATCH = "delete_want_to_watch"
 user_id = 0  # глобальные переменные для хранение этих данных
 movie_id = 0
 
+response = requests.get(f"https://api.themoviedb.org/3/genre/movie/list?api_key={TMDB_API}&language=ru-RU")
+genres_data = response.json()
+all_genres_dict = {genre['id']: genre['name'] for genre in genres_data['genres']}#создал словарь с id:name тут находится все жанры с айди и нэйм
+
 
 def registration(id, name):  # регистрация нового или вход в аккаунт оба в одной функции крч
     global user_id
@@ -43,7 +47,15 @@ def registration(id, name):  # регистрация нового или вхо
             user_id = cur.fetchone()[0]
             connection.commit()
 
-
+def TMDB_ID(title):
+    search_url = f'https://api.themoviedb.org/3/search/movie?api_key={TMDB_API}&language=ru-RU&query={title.capitalize()}'
+    search_response = requests.get(search_url)
+    search_results = search_response.json()
+    if search_results['results']:
+        movie_tmdb_id = search_results['results'][0]['id']
+    else:
+        movie_tmdb_id = None
+    return movie_tmdb_id
 def add_movie(title):  # добавление фильма в бд тут надо бы учесть всех ловер чтоли сделать чтобы он не написал одно и тоже дважды пс учел как капиталайз
     global movie_id
     with connection.cursor() as cur:
@@ -52,25 +64,14 @@ def add_movie(title):  # добавление фильма в бд тут над
         if result is not None:
             movie_id = result[0]
         else:
-            search_url = f'https://api.themoviedb.org/3/search/movie?api_key={TMDB_API}&language=ru-RU&query={title.capitalize()}'
-            search_response = requests.get(search_url)
-            search_results = search_response.json()
-
-            if search_results['results']:
-                # Берем ID первого фильма из результатов поиска
-                movie_tmdb_id = search_results['results'][0]['id']
-
+            movie_tmdb_id = TMDB_ID(title.capitalize())
+            if movie_tmdb_id:
                 # Запрашиваем информацию о фильме по его ID
                 movie_url = f'https://api.themoviedb.org/3/movie/{movie_tmdb_id}?api_key={TMDB_API}&language=ru-RU'
                 movie_response = requests.get(movie_url)
                 movie_info = movie_response.json()
-                genres = movie_info.get('genres',
-                                        [])  # тут мы ищем genres ключ а если его не будет то genres = [] чтоб потом ошибки не было
-                s = ''
-                for elm in genres:
-                    s += elm['name'] + " "
-
-                cur.execute("INSERT INTO movies(title,genre) VALUES(%s,%s) RETURNING movie_id", (title.capitalize(), s))
+                genres = ' '.join([elm['name'] for elm in movie_info.get('genres', [])])# тут мы ищем genres ключ а если его не будет то genres = [] чтоб потом ошибки не было
+                cur.execute("INSERT INTO movies(title,genre) VALUES(%s,%s) RETURNING movie_id", (title.capitalize(), genres))
                 movie_id = cur.fetchone()[0]
                 connection.commit()
             else:
@@ -157,6 +158,44 @@ def delete_want_watch(user_id, movie_id):
         cur.execute("DELETE FROM wantedtowatch WHERE user_id = %s and movie_id = %s", (user_id, movie_id))
         connection.commit()
 
+def recommendation_review(user_id, chat_id):
+    # Предполагается, что connection, TMDB_ID, TMDB_API, requests уже импортированы и настроены
+
+    with connection.cursor() as cur:
+        cur.execute("""
+            SELECT movie_id 
+            FROM watchedmovies 
+            WHERE user_id=%s 
+            AND rating=(SELECT MAX(rating) FROM watchedmovies WHERE user_id=%s)
+            """, (user_id, user_id,))
+        movie_id = cur.fetchone()[0]
+        cur.execute("SELECT title FROM movies WHERE movie_id = %s", (movie_id,))
+        movie_title = cur.fetchone()[0]
+
+    tmdb_id = TMDB_ID(movie_title)
+    response = requests.get(
+        f"https://api.themoviedb.org/3/movie/{tmdb_id}/recommendations?api_key={TMDB_API}&language=ru-RU&page=1")
+    data = response.json()
+
+    # Формируем рекомендации
+    recommendations = []
+    for movie in data['results'][:5]:  # Для первых 5 рекомендаций
+        genres = [all_genres_dict[genre_id] for genre_id in movie["genre_ids"]]#тут находится все названия жанров как массив.
+        #Короч сперва фором берет каждый айди из 5 фильмов и после дает новый элемент как genres_dict[genre_id] тут он просто берет элемент с ключом genre_id
+        recommendations.append((movie["title"], genres))
+
+    for title, genres in recommendations:
+        bot.send_message(chat_id,f"Фильм: {title}\nЖанры: {', '.join(genres)}")
+
+def recommendation_world(chat_id):
+    response=requests.get(f"https://api.themoviedb.org/3/movie/popular?api_key={TMDB_API}&language=ru-RU&page=1")
+    data=response.json()
+    good_ones = {movie["title"]: movie["genre_ids"] for movie in data["results"] if movie["vote_average"] > 7.5}
+    for title, genre_ids in good_ones.items():
+        genres = [all_genres_dict[genre_id] for genre_id in genre_ids if genre_id in all_genres_dict]
+        bot.send_message(chat_id,f"Название: {title}\nЖанры: {', '.join(genres)}")
+
+
 
 @bot.message_handler(commands=['start'])
 def start(message):
@@ -167,6 +206,9 @@ def start(message):
     btn4 = types.InlineKeyboardButton("Удалить фильм из 'Хочу посмотреть'", callback_data="Delete_want_watch")
     btn5 = types.InlineKeyboardButton("Удалить фильм из 'Посмотрел'", callback_data="Delete_watched")
     markup.add(btn5, btn4)
+    btn6 = types.InlineKeyboardButton("Ваши Рекомендации",callback_data="Recom_review")
+    btn7 = types.InlineKeyboardButton("Всемирные Рекомендации",callback_data="Recom_world")
+    markup.add(btn6,btn7)
     btn3 = types.InlineKeyboardButton("История", callback_data="History")
     markup.add(btn3)
     bot.send_message(message.chat.id, "Выберите опцию:", reply_markup=markup)
@@ -213,6 +255,13 @@ def callback_message(call):
     elif call.data == "want_watch_history":
         show_want_history(user_id, chat_id)
         start(call.message)
+
+    elif call.data == "Recom_review":
+        recommendation_review(user_id,chat_id)
+        start(call.message)
+
+    elif call.data == "Recom_world":
+        recommendation_world(chat_id)
 
     elif call.data == "8-10":
         filter(chat_id, user_id, 8)
@@ -263,6 +312,5 @@ def add_db(message):
         bot.send_message(chat_id, "Пж введите корректное название фильма и все остальное")
 
     start(message)
-
 
 bot.polling()
