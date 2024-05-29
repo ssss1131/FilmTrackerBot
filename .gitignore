@@ -2,6 +2,7 @@
 /*
 !/.gitignore
 !/FilmTrackerBot.py
+!/Images
 
 # But include the .idea folder
 !/.idea/
